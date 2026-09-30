@@ -67,9 +67,9 @@ class DesignParams:
     """Only used as a fallback: plasmids often carry repeated elements (duplicated
     promoters, LTRs), and inside those a 32 nt primer can have several binding sites. The
     annealing region is then extended until it reaches sequence unique in the template."""
-    tm_target: float = 68.0
-    tm_min: float = 62.0
-    tm_max: float = 74.0
+    tm_target: float = 64.0
+    tm_min: float = 61.0
+    tm_max: float = 67.0
     max_pair_tm_diff: float = 4.0
     """Tm targets apply to the *priming region* -- everything in the primer that base-pairs
     with the template in the first cycle. For a USER primer the 5' block carrying the dU is
@@ -77,9 +77,10 @@ class DesignParams:
     share), so it anneals along with the 3' region and must be counted. Only when an edit is
     carried on the primer is that block genuinely non-templated.
 
-    The 68 C target suits a uracil-tolerant hot-start mastermix run as 2-step PCR with a
-    combined anneal/extension step, where every primer has to hold at the extension
-    temperature rather than at a separate, lower Ta."""
+    The 64 C target matches the bench annealing step (`pipeline.ANNEAL_TEMP_C`): the
+    uracil-tolerant mastermix still extends at its own 68 C, so the program is 3-step and
+    primers only have to hold at 64 C, not at the extension temperature. The window is kept
+    tight (61-67) so the pair actually clusters on the annealing step."""
 
     gc_min: float = 30.0
     gc_max: float = 70.0

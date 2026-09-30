@@ -513,12 +513,18 @@ def _protocol_section(result: DesignResult) -> List[str]:
                      f"{p.limiting_primer_tm_C:g} °C, so annealing and extension are combined "
                      f"at {p.annealing_temp_C:g} °C.")
         else:
+            note = (f"The limiting primer has a priming Tm of {p.limiting_primer_tm_C:g} °C")
+            if p.limiting_primer_tm_C < p.annealing_temp_C:
+                note += (f" — **{p.annealing_temp_C - p.limiting_primer_tm_C:.1f} °C below "
+                         f"the {p.annealing_temp_C:g} °C annealing step**, so drop Ta or "
+                         f"lengthen that primer if the product is weak")
+            else:
+                note += (f", {p.limiting_primer_tm_C - p.annealing_temp_C:.1f} °C above the "
+                         f"{p.annealing_temp_C:g} °C annealing step")
             L.append(f"Cycling ({p.fragment}): 98 °C 2 min; 30 cycles of "
                      f"[98 °C 5 s, {p.annealing_temp_C:g} °C 15 s, "
-                     f"{EXTENSION_TEMP_C:g} °C {p.extension_seconds} s]; 68 °C 1 min. The "
-                     f"limiting primer has a priming Tm of {p.limiting_primer_tm_C:g} °C, "
-                     f"below the {EXTENSION_TEMP_C:g} °C extension step, so this fragment "
-                     f"needs a separate annealing step.")
+                     f"{EXTENSION_TEMP_C:g} °C {p.extension_seconds} s]; "
+                     f"{EXTENSION_TEMP_C:g} °C 1 min. {note}.")
     L.append("")
     L.append("### 2. USER treatment and annealing")
     L.append("")

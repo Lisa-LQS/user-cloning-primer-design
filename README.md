@@ -185,7 +185,7 @@ would amplify two products.
 ## Tuning
 
 `--overhang-min/--overhang-max` (default 8–12), `--anneal-min/--anneal-max` (18–32),
-`--tm-target` (68 °C, applied to the priming region), `--junction-slack` (how far from an edit the overhang block may sit,
+`--tm-target` (64 °C, applied to the priming region), `--junction-slack` (how far from an edit the overhang block may sit,
 30 nt), `--max-primer-len` (60 nt, the length above which an Ultramer is flagged).
 Programmatic users can pass any `DesignParams` field.
 
@@ -227,8 +227,9 @@ sequence origin, identical input, and edits inside repeated elements.
   needs only ~5 s/kb. Ordinary proofreading enzymes stall at the deoxyuridine.
 - Primer Tm is scored on the **priming region**, not the 3' annealing region alone. A USER
   junction sits in sequence both parents share, so the 5' block carrying the dU is usually
-  plain template and pairs from the first cycle. When both primers of a fragment hold at
-  68 °C the report gives a **2-step** program with annealing and extension combined there.
+  plain template and pairs from the first cycle. Primers are designed to a 64 °C priming
+  Tm and the reports give a **3-step** program: anneal at 64 °C, extend at the mastermix's
+  own 68 °C.
 - USER: 1 U per ~0.1–0.2 pmol purified product, 37 °C 25 min, then anneal. The report picks
   25 °C or a ramp to 10 °C based on the actual overhang duplex Tm.
 - Transform directly; the nicks are sealed in vivo. No ligase.

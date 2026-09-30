@@ -246,19 +246,35 @@ def design_assembly(
 EXTENSION_TEMP_C = 68.0
 """Extension temperature of the uracil-tolerant mastermix this protocol assumes."""
 
+ANNEAL_TEMP_C = 64.0
+"""Annealing temperature the cycling is written for.
 
-def _protocol(fragment: Fragment, extension_s_per_kb: int = 5) -> PcrProtocol:
+Primers are designed to a priming Tm of `DesignParams.tm_target`, and the bench protocol
+anneals here. Below `EXTENSION_TEMP_C` this gives a 3-step program -- anneal at 64 C, then
+extend at the mastermix's own 68 C. Raising it to the extension temperature collapses the
+program back to 2-step with the two steps combined.
+"""
+
+
+def _protocol(
+    fragment: Fragment,
+    extension_s_per_kb: int = 5,
+    anneal_temp_C: float = ANNEAL_TEMP_C,
+) -> PcrProtocol:
     """Cycling suggestion for a fast uracil-tolerant hot-start mastermix (repliQa HiFi
     ToughMix and similar): 98 C denaturation, extension at 68 C, 5 s/kb.
 
-    Ta comes from the *priming* Tm, not the 3' annealing region alone -- when the dU block
-    is templated it base-pairs from the first cycle and contributes to binding. If both
-    primers hold at the extension temperature the fragment is run as 2-step, with annealing
-    and extension combined at 68 C; otherwise a separate, lower Ta is given.
+    `limiting_primer_tm_C` is the weaker of the pair's *priming* Tm values, not the 3'
+    annealing region alone -- when the dU block is templated it base-pairs from the first
+    cycle and contributes to binding. It is reported so the annealing step can be sanity
+    checked against the primers that actually have to hold there.
+
+    The program is 2-step only when annealing already happens at the extension temperature;
+    otherwise annealing and extension are separate steps.
     """
     limiting_tm = min(fragment.forward.prime_tm, fragment.reverse.prime_tm)
-    two_step = limiting_tm >= EXTENSION_TEMP_C - 2.0
-    ta = EXTENSION_TEMP_C if two_step else min(72.0, max(55.0, limiting_tm + 3.0))
+    two_step = anneal_temp_C >= EXTENSION_TEMP_C - 0.5
+    ta = EXTENSION_TEMP_C if two_step else anneal_temp_C
     extension = max(15, int(round(extension_s_per_kb * fragment.expected_length / 1000.0)))
     return PcrProtocol(
         fragment=fragment.name,

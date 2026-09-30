@@ -21,8 +21,11 @@ from user_cloning import DesignParams, SeqRecord, compare_plasmids, read_sequenc
 from user_cloning.design import U_MARK  # noqa: E402
 from user_cloning.report import allocate_batch, primer_rows  # noqa: E402
 from user_cloning.pipeline import (  # noqa: E402
+    ANNEAL_TEMP_C,
+    EXTENSION_TEMP_C,
     STATUS_NO_DIFFERENCE,
     STATUS_OK,
+    _protocol,
     design_assembly,
     design_one,
     predicted_plasmid,
@@ -58,6 +61,15 @@ BACKBONE = load_backbone()
 
 def rec(name: str, seq: str) -> SeqRecord:
     return SeqRecord(name=name, seq=seq, source_row=1)
+
+
+def point_mutant(pos: int = 4000) -> str:
+    """The backbone with one base changed. The replacement is chosen against the base
+    actually at `pos`, because picking a fixed letter can silently reproduce the backbone
+    and leave a test asserting over an empty design."""
+    original = BACKBONE[pos]
+    new = "A" if original != "A" else "C"
+    return BACKBONE[:pos] + new + BACKBONE[pos + 1:]
 
 
 class DesignCaseMixin:
@@ -292,9 +304,20 @@ class TestPrimingRegion(DesignCaseMixin, unittest.TestCase):
     counted, or the reported Tm understates the real duplex and Ta comes out too low.
     """
 
+    def designed(self, target_seq: str):
+        """Run a design and refuse to hand back an empty one.
+
+        Most assertions here loop over `result.primers`, so a design that quietly produces
+        nothing would make them all pass without testing anything.
+        """
+        result = self.run_design(target_seq)
+        self.assertEqual(result.status, STATUS_OK, msg="; ".join(result.messages))
+        self.assertTrue(result.primers, "design produced no primers")
+        self.assertTrue(result.fragments, "design produced no fragments")
+        return result
+
     def test_priming_region_is_a_templated_suffix_of_the_primer(self):
-        target = BACKBONE[:4000] + "A" + BACKBONE[4001:]
-        result = self.run_design(target)
+        result = self.designed(point_mutant())
         for primer in result.primers:
             self.assertTrue(primer.prime_region.endswith(primer.anneal))
             self.assertEqual(primer.sequence[len(primer.sequence) - len(primer.prime_region):],
@@ -307,8 +330,7 @@ class TestPrimingRegion(DesignCaseMixin, unittest.TestCase):
             )
 
     def test_priming_tm_is_at_least_the_annealing_tm(self):
-        target = BACKBONE[:4000] + "A" + BACKBONE[4001:]
-        for primer in self.run_design(target).primers:
+        for primer in self.designed(point_mutant()).primers:
             self.assertGreaterEqual(primer.prime_tm, primer.anneal_tm - 1e-9)
             if len(primer.prime_region) > len(primer.anneal):
                 self.assertGreater(primer.prime_tm, primer.anneal_tm)
@@ -322,8 +344,7 @@ class TestPrimingRegion(DesignCaseMixin, unittest.TestCase):
         sequence in the *target* but comes from only one side of the *template*, so one
         primer of the pair carries a block the template only partly matches.
         """
-        target = BACKBONE[:3000] + BACKBONE[3120:]
-        result = self.run_design(target)
+        result = self.designed(BACKBONE[:3000] + BACKBONE[3120:])
         for primer in result.primers:
             self.assertEqual(primer.extra, "", "a deletion needs no non-templated insert")
             overhang_bases = len(primer.prime_region) - len(primer.anneal)
@@ -339,28 +360,37 @@ class TestPrimingRegion(DesignCaseMixin, unittest.TestCase):
 
     def test_priming_tm_lands_in_the_target_window(self):
         params = DesignParams()
-        target = BACKBONE[:4000] + "A" + BACKBONE[4001:]
-        for primer in self.run_design(target).primers:
+        for primer in self.designed(point_mutant()).primers:
             self.assertGreaterEqual(primer.prime_tm, params.tm_min - 4)
             self.assertLessEqual(primer.prime_tm, params.tm_max + 4)
 
-    def test_protocol_uses_priming_tm_and_goes_two_step_at_68(self):
+    def test_protocol_anneals_at_64_and_extends_at_68(self):
+        """Primers are designed to 64 C and the bench program anneals there, while the
+        mastermix still extends at its own 68 C -- so a routine design is 3-step."""
         params = DesignParams()
-        target = BACKBONE[:4000] + "A" + BACKBONE[4001:]
-        result = self.run_design(target)
+        self.assertEqual(params.tm_target, 64.0)
+        self.assertEqual((params.tm_min, params.tm_max), (61.0, 67.0))
+
+        result = self.designed(point_mutant())
         by_name = {f.name: f for f in result.fragments}
         for protocol in result.protocols:
             fragment = by_name[protocol.fragment]
             limiting = min(fragment.forward.prime_tm, fragment.reverse.prime_tm)
             self.assertAlmostEqual(protocol.limiting_primer_tm_C, round(limiting, 1), places=6)
-            self.assertEqual(protocol.two_step, limiting >= 66.0)
-            if protocol.two_step:
-                self.assertEqual(protocol.annealing_temp_C, 68.0)
-            else:
-                self.assertLess(protocol.annealing_temp_C, 68.0)
-        # These defaults are chosen so a routine design does come out 2-step.
-        self.assertTrue(all(p.two_step for p in result.protocols))
-        self.assertEqual(params.tm_target, 68.0)
+            self.assertFalse(protocol.two_step)
+            self.assertEqual(protocol.annealing_temp_C, ANNEAL_TEMP_C)
+            self.assertLess(protocol.annealing_temp_C, EXTENSION_TEMP_C)
+
+    def test_protocol_collapses_to_two_step_if_annealing_at_the_extension_temp(self):
+        """The 2-step branch is not dead code: it is what annealing at 68 C would give."""
+        fragment = self.designed(point_mutant()).fragments[0]
+        two = _protocol(fragment, anneal_temp_C=EXTENSION_TEMP_C)
+        self.assertTrue(two.two_step)
+        self.assertEqual(two.annealing_temp_C, EXTENSION_TEMP_C)
+        three = _protocol(fragment, anneal_temp_C=ANNEAL_TEMP_C)
+        self.assertFalse(three.two_step)
+        # The limiting primer is a property of the pair, not of the cycling choice.
+        self.assertEqual(two.limiting_primer_tm_C, three.limiting_primer_tm_C)
 
 
 class TestBatching(unittest.TestCase):
