@@ -284,6 +284,85 @@ class TestMultiTemplateAssembly(unittest.TestCase):
 
 
 
+class TestPrimingRegion(DesignCaseMixin, unittest.TestCase):
+    """Tm is scored on everything that pairs in cycle 1, not on the 3' region alone.
+
+    A USER junction is placed in sequence the two parents share, so the 5' block carrying
+    the dU is normally plain template: it base-pairs from the first cycle and has to be
+    counted, or the reported Tm understates the real duplex and Ta comes out too low.
+    """
+
+    def test_priming_region_is_a_templated_suffix_of_the_primer(self):
+        target = BACKBONE[:4000] + "A" + BACKBONE[4001:]
+        result = self.run_design(target)
+        for primer in result.primers:
+            self.assertTrue(primer.prime_region.endswith(primer.anneal))
+            self.assertEqual(primer.sequence[len(primer.sequence) - len(primer.prime_region):],
+                             primer.prime_region)
+            self.assertGreaterEqual(len(primer.prime_region), len(primer.anneal))
+            # Whatever we call templated must really occur in the template.
+            self.assertGreaterEqual(
+                count_circular_occurrences(BACKBONE, primer.prime_region, both_strands=True), 1,
+                f"{primer.name} priming region does not occur in the template",
+            )
+
+    def test_priming_tm_is_at_least_the_annealing_tm(self):
+        target = BACKBONE[:4000] + "A" + BACKBONE[4001:]
+        for primer in self.run_design(target).primers:
+            self.assertGreaterEqual(primer.prime_tm, primer.anneal_tm - 1e-9)
+            if len(primer.prime_region) > len(primer.anneal):
+                self.assertGreater(primer.prime_tm, primer.anneal_tm)
+
+    def test_tail_templated_means_the_du_base_itself_pairs(self):
+        """`tail_templated` is about the dU base, not the whole 5' block.
+
+        The flag says the templated run reaches back past every non-templated base and
+        covers the dU, which sits at the end of the tail. The bases 5' of the dU may still
+        hang off unpaired -- in a deletion, for instance, the overhang block is shared
+        sequence in the *target* but comes from only one side of the *template*, so one
+        primer of the pair carries a block the template only partly matches.
+        """
+        target = BACKBONE[:3000] + BACKBONE[3120:]
+        result = self.run_design(target)
+        for primer in result.primers:
+            self.assertEqual(primer.extra, "", "a deletion needs no non-templated insert")
+            overhang_bases = len(primer.prime_region) - len(primer.anneal)
+            if primer.tail_templated:
+                self.assertGreaterEqual(
+                    overhang_bases, len(primer.extra) + 1,
+                    f"{primer.name} is flagged templated but its dU is outside the duplex",
+                )
+            else:
+                self.assertLess(overhang_bases, len(primer.extra) + 1)
+        self.assertTrue(any(p.tail_templated for p in result.primers),
+                        "at least one primer of a deletion pair should pair through its dU")
+
+    def test_priming_tm_lands_in_the_target_window(self):
+        params = DesignParams()
+        target = BACKBONE[:4000] + "A" + BACKBONE[4001:]
+        for primer in self.run_design(target).primers:
+            self.assertGreaterEqual(primer.prime_tm, params.tm_min - 4)
+            self.assertLessEqual(primer.prime_tm, params.tm_max + 4)
+
+    def test_protocol_uses_priming_tm_and_goes_two_step_at_68(self):
+        params = DesignParams()
+        target = BACKBONE[:4000] + "A" + BACKBONE[4001:]
+        result = self.run_design(target)
+        by_name = {f.name: f for f in result.fragments}
+        for protocol in result.protocols:
+            fragment = by_name[protocol.fragment]
+            limiting = min(fragment.forward.prime_tm, fragment.reverse.prime_tm)
+            self.assertAlmostEqual(protocol.limiting_primer_tm_C, round(limiting, 1), places=6)
+            self.assertEqual(protocol.two_step, limiting >= 66.0)
+            if protocol.two_step:
+                self.assertEqual(protocol.annealing_temp_C, 68.0)
+            else:
+                self.assertLess(protocol.annealing_temp_C, 68.0)
+        # These defaults are chosen so a routine design does come out 2-step.
+        self.assertTrue(all(p.two_step for p in result.protocols))
+        self.assertEqual(params.tm_target, 68.0)
+
+
 class TestBatching(unittest.TestCase):
     """Several batches can land on the same day, and results are never destroyed."""
 

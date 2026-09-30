@@ -22,9 +22,11 @@ from .sequences import gc_fraction
 class PcrConditions:
     """Reaction conditions used for every Tm calculation.
 
-    Defaults match a standard 50 uL Phusion U / Q5U reaction: 1x HF buffer is ~50 mM
-    monovalent salt, 2 mM Mg2+ (1.5 mM free after dNTP chelation), 200 uM each dNTP,
-    500 nM each primer.
+    Defaults are the usual 50 uL high-fidelity reaction: ~50 mM monovalent salt, 2 mM
+    Mg2+ (1.5 mM free after dNTP chelation), 200 uM each dNTP, 500 nM each primer. The
+    mastermix actually used (repliQa HiFi ToughMix) does not publish its buffer
+    composition, so these stand in for it; they are close enough that the Tm ranking
+    between primers is unaffected, and the 68 C target was set against these numbers.
     """
 
     monovalent_mM: float = 50.0

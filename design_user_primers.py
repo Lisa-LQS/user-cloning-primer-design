@@ -76,7 +76,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     tune.add_argument("--anneal-min", type=int, default=DesignParams.anneal_min)
     tune.add_argument("--anneal-max", type=int, default=DesignParams.anneal_max)
     tune.add_argument("--tm-target", type=float, default=DesignParams.tm_target,
-                      help="target Tm (C) for the template-binding region")
+                      help="target Tm (C) for the priming region (everything that pairs with "
+                           "the template in cycle 1, dU block included when it is templated)")
     tune.add_argument("--junction-slack", type=int, default=DesignParams.junction_window_slack,
                       help="how far from an edit the overhang block may be placed (nt)")
     tune.add_argument("--max-primer-len", type=int, default=DesignParams.soft_max_primer_len,
@@ -214,7 +215,8 @@ def report_result(result: DesignResult, paths: dict) -> None:
         for primer in result.primers:
             print(f"  {primer.name:<8} {primer.order_sequence}")
             print(f"           {primer.length} nt, dU at {primer.u_index + 1}, "
-                  f"annealing Tm {primer.anneal_tm:.1f} C")
+                  f"priming Tm {primer.prime_tm:.1f} C over {len(primer.prime_region)} nt"
+                  f"{'' if primer.tail_templated else ' (dU block not templated)'}")
         source_of = {f.name: f.source_name for f in result.fragments}
         for p in result.protocols:
             print(f"  {p.fragment} from {source_of.get(p.fragment, '?')}: "

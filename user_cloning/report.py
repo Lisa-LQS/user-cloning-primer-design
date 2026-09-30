@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Sequence
 
 from .design import U_MARK, Junction
 from .pipeline import (
+    EXTENSION_TEMP_C,
     STATUS_NO_DIFFERENCE,
     STATUS_OK,
     DesignResult,
@@ -24,7 +25,9 @@ PRIMER_COLUMNS = [
     "user_junction_sequence", "user_junction_length_nt", "user_junction_duplex_tm_C",
     "three_prime_overhang_this_end", "amplified_from",
     "tail_removed_by_USER", "non_templated_extra", "annealing_region", "annealing_length_nt",
-    "annealing_tm_C", "full_length_tm_C", "gc_percent",
+    "annealing_tm_C",
+    "priming_region", "priming_length_nt", "priming_tm_C", "dU_block_templated",
+    "full_length_tm_C", "gc_percent",
     "template_binding_sites", "warnings",
 ]
 
@@ -420,6 +423,9 @@ def _primer_section(result: DesignResult) -> List[str]:
         L.append(f"   non-templated   = {primer.extra or '(none)'}")
         L.append(f"   annealing       = {primer.anneal}   ({len(primer.anneal)} nt, "
                  f"Tm {primer.anneal_tm:.1f} C, {primer.template_hits} site in template)")
+        L.append(f"   priming region  = {primer.prime_region}   ({len(primer.prime_region)} nt, "
+                 f"Tm {primer.prime_tm:.1f} C, dU block "
+                 f"{'templated -- pairs from cycle 1' if primer.tail_templated else 'not templated'})")
         L.append(f"   3' overhang     = {primer.overhang}   (exposed after USER)")
         L.append("```")
         L.append("")
@@ -479,23 +485,40 @@ def _protocol_section(result: DesignResult) -> List[str]:
     L = ["## Suggested wet-lab protocol", ""]
     L.append("### 1. PCR (uracil-tolerant polymerase)")
     L.append("")
-    L.append("Use **Phusion U Hot Start**, **Q5U**, or **PfuTurbo Cx**. A standard proofreading "
-             "polymerase will stall at the dU and must not be used.")
+    L.append("Use **repliQa HiFi ToughMix** (Quantabio). It amplifies through uracil and "
+             "tolerates dU-containing primers, extends at 68 °C and needs only ~5 s/kb. Any "
+             "standard proofreading polymerase will stall at the dU and must not be used.")
     L.append("")
-    L.append("| Fragment | Template | Annealing temp | Extension | Product |")
-    L.append("| --- | --- | --- | --- | --- |")
+    L.append("| Fragment | Template | Cycling | Annealing temp | Extension | Product |")
+    L.append("| --- | --- | --- | --- | --- | --- |")
     source_of = {f.name: f.source_name for f in result.fragments}
     for p in result.protocols:
-        L.append(f"| {p.fragment} | {source_of.get(p.fragment, '-')} | {p.annealing_temp_C} °C "
-                 f"| {p.extension_seconds} s | {p.product_length:,} bp |")
+        mode = "2-step (anneal + extend combined)" if p.two_step else "3-step"
+        L.append(f"| {p.fragment} | {source_of.get(p.fragment, '-')} | {mode} "
+                 f"| {p.annealing_temp_C} °C | {p.extension_seconds} s | {p.product_length:,} bp |")
     L.append("")
     L.append(f"Tm values assume {cond.monovalent_mM:.0f} mM monovalent salt, "
              f"{cond.divalent_mM:.1f} mM Mg²⁺, {cond.dntp_mM:.1f} mM dNTP, "
              f"{cond.primer_nM:.0f} nM primer. Annealing temperature is derived from the "
-             "template-binding region only, because the 5' tails do not pair in the first cycles.")
+             "**priming region** — the whole stretch of each primer that pairs with the "
+             "template in the first cycle. Where the dU block sits in sequence both parents "
+             "share it is plain template, so it anneals too and is counted; only a block "
+             "carrying an edit is a true non-pairing flap.")
     L.append("")
-    L.append("Cycling: 98 °C 30 s; 30 cycles of [98 °C 10 s, Ta 20 s, 72 °C extension]; "
-             "72 °C 5 min.")
+    for p in result.protocols:
+        if p.two_step:
+            L.append(f"Cycling ({p.fragment}): 98 °C 2 min; 30 cycles of "
+                     f"[98 °C 5 s, {p.annealing_temp_C:g} °C {p.extension_seconds} s]; "
+                     f"68 °C 1 min. The limiting primer has a priming Tm of "
+                     f"{p.limiting_primer_tm_C:g} °C, so annealing and extension are combined "
+                     f"at {p.annealing_temp_C:g} °C.")
+        else:
+            L.append(f"Cycling ({p.fragment}): 98 °C 2 min; 30 cycles of "
+                     f"[98 °C 5 s, {p.annealing_temp_C:g} °C 15 s, "
+                     f"{EXTENSION_TEMP_C:g} °C {p.extension_seconds} s]; 68 °C 1 min. The "
+                     f"limiting primer has a priming Tm of {p.limiting_primer_tm_C:g} °C, "
+                     f"below the {EXTENSION_TEMP_C:g} °C extension step, so this fragment "
+                     f"needs a separate annealing step.")
     L.append("")
     L.append("### 2. USER treatment and annealing")
     L.append("")

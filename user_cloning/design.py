@@ -4,7 +4,7 @@ Design model
 ------------
 USER (Uracil-Specific Excision Reagent) cloning: PCR primers carry a single
 deoxyuridine a few bases in from the 5' end and are amplified with a uracil-tolerant
-proofreading polymerase (Phusion U, Q5U, PfuTurbo Cx). USER enzyme (UDG + Endo VIII)
+proofreading polymerase (repliQa HiFi ToughMix). USER enzyme (UDG + Endo VIII)
 excises the uracil and nicks the backbone, releasing the short 5' flap of each strand
 and leaving a 3' single-stranded overhang on the opposite strand. Fragments whose
 overhangs are complementary anneal and are transformed directly; E. coli seals the nicks.
@@ -52,7 +52,8 @@ U_MARK = "/ideoxyU/"  # IDT ordering notation for deoxyuridine
 
 @dataclass(frozen=True)
 class DesignParams:
-    """Tunable design constraints. Defaults suit Phusion U on an 8 kb plasmid."""
+    """Tunable design constraints. Defaults suit repliQa HiFi ToughMix run as 2-step
+    PCR on an 8 kb plasmid."""
 
     overhang_min: int = 8
     overhang_max: int = 12
@@ -66,10 +67,19 @@ class DesignParams:
     """Only used as a fallback: plasmids often carry repeated elements (duplicated
     promoters, LTRs), and inside those a 32 nt primer can have several binding sites. The
     annealing region is then extended until it reaches sequence unique in the template."""
-    tm_target: float = 62.0
-    tm_min: float = 57.0
-    tm_max: float = 69.0
+    tm_target: float = 68.0
+    tm_min: float = 62.0
+    tm_max: float = 74.0
     max_pair_tm_diff: float = 4.0
+    """Tm targets apply to the *priming region* -- everything in the primer that base-pairs
+    with the template in the first cycle. For a USER primer the 5' block carrying the dU is
+    usually plain template sequence (the junction is placed inside sequence the two parents
+    share), so it anneals along with the 3' region and must be counted. Only when an edit is
+    carried on the primer is that block genuinely non-templated.
+
+    The 68 C target suits a uracil-tolerant hot-start mastermix run as 2-step PCR with a
+    combined anneal/extension step, where every primer has to hold at the extension
+    temperature rather than at a separate, lower Ta."""
 
     gc_min: float = 30.0
     gc_max: float = 70.0
@@ -97,6 +107,9 @@ class Primer:
     extra: str                # non-templated sequence retained in the product
     anneal: str               # 3' region that base-pairs with the template
     anneal_tm: float
+    prime_region: str         # everything that base-pairs in cycle 1 (tail included if templated)
+    prime_tm: float
+    tail_templated: bool
     full_tm: float
     gc_percent: float
     template_hits: int
@@ -143,6 +156,10 @@ class Primer:
             "annealing_region": self.anneal,
             "annealing_length_nt": len(self.anneal),
             "annealing_tm_C": round(self.anneal_tm, 1),
+            "priming_region": self.prime_region,
+            "priming_length_nt": len(self.prime_region),
+            "priming_tm_C": round(self.prime_tm, 1),
+            "dU_block_templated": "yes" if self.tail_templated else "no",
             "full_length_tm_C": round(self.full_tm, 1),
             "gc_percent": round(self.gc_percent, 1),
             "template_binding_sites": self.template_hits,
@@ -590,9 +607,22 @@ def _scan_anneal_lengths(
             continue  # annealing region must match the template exactly
 
         anneal_tm = thermo.tm(anneal, params.conditions)
-        if anneal_tm < params.tm_min - 4:
+
+        # The dU block is only a "flap" when it carries an edit. Whenever the junction sits
+        # in sequence both parents share, the block is plain template and base-pairs in the
+        # first cycle along with the 3' region -- so the duplex that actually forms is
+        # tail + anneal, and that is what the Tm window has to be applied to.
+        head = tail + extra
+        matched = _templated_head_length(head, template, direction, anchor + template_offset)
+        prime_region = head[len(head) - matched:] + anneal if matched else anneal
+        prime_tm = thermo.tm(prime_region, params.conditions) if matched else anneal_tm
+        # The dU sits at the end of the tail, so it pairs iff the templated run reaches
+        # back past every base of `extra`.
+        tail_templated = matched >= len(extra) + 1
+
+        if prime_tm < params.tm_min - 4:
             continue
-        if enforce_tm_ceiling and anneal_tm > params.tm_max + 4:
+        if enforce_tm_ceiling and prime_tm > params.tm_max + 4:
             continue
 
         sequence = tail + extra + anneal
@@ -620,11 +650,13 @@ def _scan_anneal_lengths(
 
         primer = Primer(
             name="", junction=-1, direction=direction, sequence=sequence, u_index=u_index,
-            tail=tail, extra=extra, anneal=anneal, anneal_tm=anneal_tm, full_tm=stats.tm,
+            tail=tail, extra=extra, anneal=anneal, anneal_tm=anneal_tm,
+            prime_region=prime_region, prime_tm=prime_tm, tail_templated=tail_templated,
+            full_tm=stats.tm,
             gc_percent=stats.gc_percent, template_hits=hits, warnings=warns,
         )
         key = (
-            abs(anneal_tm - params.tm_target),
+            abs(prime_tm - params.tm_target),
             _three_prime_penalty(anneal),
             float(len(sequence)),
         )
@@ -632,6 +664,34 @@ def _scan_anneal_lengths(
             best, best_key = primer, key
 
     return best
+
+
+def _templated_head_length(
+    head: str, template: str, direction: str, anneal_anchor: int
+) -> int:
+    """How many bases of a primer's 5' head (tail + extra) also pair with the template.
+
+    The 3' annealing region is templated by construction; this walks 5' from its edge and
+    counts how far the match keeps going. It is usually not zero: a USER junction is placed
+    in sequence the two parents share, so the dU block is plain template, and even when the
+    primer carries an edit the bases nearest the annealing region can still match (a Kozak
+    ending in ATG, say, sitting right on the donor's own start codon).
+
+    `anneal_anchor` is the template coordinate where the annealing region starts (forward)
+    or ends, exclusive (reverse).
+    """
+    matched = 0
+    for k in range(1, len(head) + 1):
+        if direction == "forward":
+            base = circular_slice(template, anneal_anchor - k, anneal_anchor - k + 1)
+        else:
+            base = revcomp(
+                circular_slice(template, anneal_anchor + k - 1, anneal_anchor + k)
+            )
+        if head[-k] != base:
+            break
+        matched = k
+    return matched
 
 
 def _three_prime_penalty(anneal: str) -> float:
@@ -660,11 +720,11 @@ def _score(
     detail: Dict[str, float] = {}
     warns: List[str] = []
 
-    detail["tm_offset"] = abs(fwd.anneal_tm - params.tm_target) + abs(rev.anneal_tm - params.tm_target)
-    detail["tm_mismatch"] = 2.0 * abs(fwd.anneal_tm - rev.anneal_tm)
-    if abs(fwd.anneal_tm - rev.anneal_tm) > params.max_pair_tm_diff:
+    detail["tm_offset"] = abs(fwd.prime_tm - params.tm_target) + abs(rev.prime_tm - params.tm_target)
+    detail["tm_mismatch"] = 2.0 * abs(fwd.prime_tm - rev.prime_tm)
+    if abs(fwd.prime_tm - rev.prime_tm) > params.max_pair_tm_diff:
         warns.append(
-            f"annealing Tm differs by {abs(fwd.anneal_tm - rev.anneal_tm):.1f} C between the pair"
+            f"priming Tm differs by {abs(fwd.prime_tm - rev.prime_tm):.1f} C between the pair"
         )
 
     # 8-10 nt overhangs are all routine, so only penalise drifting outside that plateau.

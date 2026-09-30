@@ -33,6 +33,8 @@ class PcrProtocol:
     annealing_temp_C: float
     extension_seconds: int
     product_length: int
+    two_step: bool = False
+    limiting_primer_tm_C: float = 0.0
 
 
 @dataclass
@@ -241,17 +243,30 @@ def design_assembly(
     return result
 
 
-def _protocol(fragment: Fragment, extension_s_per_kb: int = 30) -> PcrProtocol:
-    """Phusion-style cycling suggestion. Ta uses the annealing regions only, because the
-    non-templated 5' tails contribute nothing in the first cycles."""
-    limiting_tm = min(fragment.forward.anneal_tm, fragment.reverse.anneal_tm)
-    ta = min(72.0, max(55.0, limiting_tm + 3.0))
-    extension = max(30, int(round(extension_s_per_kb * fragment.expected_length / 1000.0)))
+EXTENSION_TEMP_C = 68.0
+"""Extension temperature of the uracil-tolerant mastermix this protocol assumes."""
+
+
+def _protocol(fragment: Fragment, extension_s_per_kb: int = 5) -> PcrProtocol:
+    """Cycling suggestion for a fast uracil-tolerant hot-start mastermix (repliQa HiFi
+    ToughMix and similar): 98 C denaturation, extension at 68 C, 5 s/kb.
+
+    Ta comes from the *priming* Tm, not the 3' annealing region alone -- when the dU block
+    is templated it base-pairs from the first cycle and contributes to binding. If both
+    primers hold at the extension temperature the fragment is run as 2-step, with annealing
+    and extension combined at 68 C; otherwise a separate, lower Ta is given.
+    """
+    limiting_tm = min(fragment.forward.prime_tm, fragment.reverse.prime_tm)
+    two_step = limiting_tm >= EXTENSION_TEMP_C - 2.0
+    ta = EXTENSION_TEMP_C if two_step else min(72.0, max(55.0, limiting_tm + 3.0))
+    extension = max(15, int(round(extension_s_per_kb * fragment.expected_length / 1000.0)))
     return PcrProtocol(
         fragment=fragment.name,
         annealing_temp_C=round(ta, 1),
         extension_seconds=extension,
         product_length=fragment.expected_length,
+        two_step=two_step,
+        limiting_primer_tm_C=round(limiting_tm, 1),
     )
 
 

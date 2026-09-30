@@ -3,7 +3,8 @@ designs/
 
 # Lab input files kept out of the shared repo. USER_design_1.xlsx is the shipped example;
 # any other USER_design_*.xlsx stays local (the file itself is untouched, just untracked).
-USER_design_2.xlsx
+USER_design_*.xlsx
+!USER_design_1.xlsx
 
 # Local editor / tooling state
 .claude/
