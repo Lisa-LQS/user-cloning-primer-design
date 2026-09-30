@@ -105,10 +105,15 @@ class Primer:
     sequence: str             # plain DNA, U written as T
     u_index: int              # 0-based position of the deoxyuridine
     tail: str                 # 5' flap removed by USER, including the U position
-    extra: str                # non-templated sequence retained in the product
-    anneal: str               # 3' region that base-pairs with the template
-    anneal_tm: float
-    prime_region: str         # everything that base-pairs in cycle 1 (tail included if templated)
+    extra: str                # sequence carried on the primer rather than copied from the
+                              # template; may still coincide with it (see prime_region)
+    anneal: str               # the block copied from the template 3' of the junction. This
+                              # is a *layout* boundary, not the edge of the duplex: the
+                              # match usually runs on past it into `extra` and `tail`.
+    anneal_tm: float          # Tm of that block alone -- not the duplex that forms
+    prime_region: str         # what actually base-pairs in cycle 1: the longest 3' run of
+                              # the primer matching the template. This is the real
+                              # annealing region and the one the Tm targets apply to.
     prime_tm: float
     tail_templated: bool
     full_tm: float
@@ -152,15 +157,20 @@ class Primer:
             "plain_sequence": self.sequence,
             "length_nt": self.length,
             "u_position_from_5prime": self.u_index + 1,
-            "tail_removed_by_USER": self.tail,
-            "non_templated_extra": self.extra or "-",
-            "annealing_region": self.anneal,
-            "annealing_length_nt": len(self.anneal),
-            "annealing_tm_C": round(self.anneal_tm, 1),
+            # What actually anneals, first -- these are the numbers to judge a primer on.
             "priming_region": self.prime_region,
             "priming_length_nt": len(self.prime_region),
             "priming_tm_C": round(self.prime_tm, 1),
             "dU_block_templated": "yes" if self.tail_templated else "no",
+            # How the primer was laid out. These are design boundaries, not duplex edges:
+            # the templated run usually extends 5' past `template_block_3prime`, so
+            # `extra_carried_on_primer` can contain bases that do pair with the template.
+            "tail_removed_by_USER": self.tail,
+            "extra_carried_on_primer": self.extra or "-",
+            "template_block_3prime": self.anneal,
+            "template_block_length_nt": len(self.anneal),
+            "template_block_tm_C": round(self.anneal_tm, 1),
+            "templated_beyond_block_nt": len(self.prime_region) - len(self.anneal),
             "full_length_tm_C": round(self.full_tm, 1),
             "gc_percent": round(self.gc_percent, 1),
             "template_binding_sites": self.template_hits,

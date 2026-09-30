@@ -446,6 +446,64 @@ class TestPrimerPairingAcrossJunctions(unittest.TestCase):
         self.assertEqual(pair_tm_penalty(a, a), 0.0)
 
 
+class TestReportedRegionsMatchReality(unittest.TestCase):
+    """The reported priming region must be the duplex that really forms.
+
+    `template_block_3prime` is only where the design put the junction boundary. The match
+    with the source normally runs on past it, so a column claiming those 5' bases are
+    non-templated is wrong -- and a Tm computed on the block alone understates the duplex.
+    """
+
+    def two_junction_design(self):
+        donor_payload = "".join(BACKBONE[i] for i in range(600, 1200))
+        donor = rec("pDONOR", BACKBONE[3000:4000] + donor_payload + BACKBONE[4000:5000])
+        backbone = rec("pBB", BACKBONE)
+        target_seq = BACKBONE[:5300] + donor_payload + BACKBONE[5300:]
+        result = design_assembly([backbone, donor], rec("pASM", target_seq), DATE)
+        self.assertEqual(result.status, STATUS_OK, "; ".join(result.messages))
+        return result
+
+    @staticmethod
+    def longest_3prime_match(primer_seq: str, source: str, direction: str) -> int:
+        """How far back from the 3' end the primer really matches the source, circularly."""
+        doubled = source + source
+        best = 0
+        for length in range(1, len(primer_seq) + 1):
+            probe = primer_seq[-length:]
+            hay = doubled if direction == "forward" else revcomp(doubled)
+            if probe in hay:
+                best = length
+        return best
+
+    def test_priming_region_is_the_maximal_true_match(self):
+        for fragment in self.two_junction_design().fragments:
+            for primer in (fragment.forward, fragment.reverse):
+                true_len = self.longest_3prime_match(
+                    primer.sequence, fragment.source_seq, primer.direction)
+                self.assertEqual(
+                    len(primer.prime_region), true_len,
+                    f"{primer.name}: reported priming region is "
+                    f"{len(primer.prime_region)} nt but the primer really matches "
+                    f"{fragment.source_name} over {true_len} nt",
+                )
+                self.assertEqual(primer.prime_region, primer.sequence[-true_len:])
+
+    def test_the_layout_block_never_overstates_the_duplex(self):
+        for fragment in self.two_junction_design().fragments:
+            for primer in (fragment.forward, fragment.reverse):
+                self.assertGreaterEqual(len(primer.prime_region), len(primer.anneal))
+                self.assertGreaterEqual(primer.prime_tm, primer.anneal_tm - 1e-9)
+
+    def test_csv_reports_how_far_the_match_runs_past_the_block(self):
+        result = self.two_junction_design()
+        for row, primer in zip(primer_rows(result), result.primers):
+            self.assertEqual(row["templated_beyond_block_nt"],
+                             len(primer.prime_region) - len(primer.anneal))
+            # The old column name asserted these bases were non-templated. Whatever the
+            # column is called now, it must not make that claim when they do pair.
+            self.assertNotIn("non_templated", " ".join(row.keys()))
+
+
 class TestBatching(unittest.TestCase):
     """Several batches can land on the same day, and results are never destroyed."""
 

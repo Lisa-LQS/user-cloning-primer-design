@@ -24,9 +24,10 @@ PRIMER_COLUMNS = [
     "u_position_from_5prime",
     "user_junction_sequence", "user_junction_length_nt", "user_junction_duplex_tm_C",
     "three_prime_overhang_this_end", "amplified_from",
-    "tail_removed_by_USER", "non_templated_extra", "annealing_region", "annealing_length_nt",
-    "annealing_tm_C",
     "priming_region", "priming_length_nt", "priming_tm_C", "dU_block_templated",
+    "tail_removed_by_USER", "extra_carried_on_primer",
+    "template_block_3prime", "template_block_length_nt", "template_block_tm_C",
+    "templated_beyond_block_nt",
     "full_length_tm_C", "gc_percent",
     "template_binding_sites", "warnings",
 ]
@@ -400,18 +401,26 @@ def _repeat_section(result: DesignResult) -> List[str]:
 def _primer_section(result: DesignResult) -> List[str]:
     rows = primer_rows(result)
     L = ["## Primers to order", ""]
-    L.append("| Name | Sequence (5'→3') | nt | U pos | Anneal Tm | GC% | USER junction |")
-    L.append("| --- | --- | --- | --- | --- | --- | --- |")
+    L.append("| Name | Sequence (5'→3') | nt | U pos | Priming Tm | Primes over | GC% "
+             "| USER junction |")
+    L.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
     for row in rows:
         L.append(
             f"| {row['primer_name']} | `{row['order_sequence']}` | {row['length_nt']} "
-            f"| {row['u_position_from_5prime']} | {row['annealing_tm_C']} °C "
-            f"| {row['gc_percent']} | `{row['user_junction_sequence']}` |"
+            f"| {row['u_position_from_5prime']} | {row['priming_tm_C']} °C "
+            f"| {row['priming_length_nt']} nt | {row['gc_percent']} "
+            f"| `{row['user_junction_sequence']}` |"
         )
     L.append("")
     L.append(f"_{USER_JUNCTION_COLUMN_NOTE}_")
     L.append("")
     L.append("### Primer anatomy")
+    L.append("")
+    L.append("`tail` / `carried on 5'` / `template block` are where the *design* put the "
+             "boundaries. They are not the edge of the duplex: the match with the template "
+             "normally runs on past the block, so `carried on 5'` can hold bases that do "
+             "pair. **`PRIMES OVER` is the region that actually anneals**, and its Tm is "
+             "the one the annealing temperature is set from.")
     L.append("")
     for primer, row in zip(result.primers, rows):
         L.append(f"**{row['primer_name']}** ({primer.direction}, junction {primer.junction + 1})")
@@ -420,11 +429,14 @@ def _primer_section(result: DesignResult) -> List[str]:
         L.append(f"5'-{primer.tail[:-1]}[{primer.tail[-1]}=dU]{primer.extra}{primer.anneal}-3'")
         L.append(f"   tail            = {primer.tail}   ({len(primer.tail)} nt, dU at position "
                  f"{primer.u_index + 1})")
-        L.append(f"   non-templated   = {primer.extra or '(none)'}")
-        L.append(f"   annealing       = {primer.anneal}   ({len(primer.anneal)} nt, "
-                 f"Tm {primer.anneal_tm:.1f} C, {primer.template_hits} site in template)")
-        L.append(f"   priming region  = {primer.prime_region}   ({len(primer.prime_region)} nt, "
-                 f"Tm {primer.prime_tm:.1f} C, dU block "
+        L.append(f"   carried on 5'   = {primer.extra or '(none)'}")
+        L.append(f"   template block  = {primer.anneal}   ({len(primer.anneal)} nt, "
+                 f"{primer.template_hits} site in template) -- layout boundary only")
+        beyond = len(primer.prime_region) - len(primer.anneal)
+        reach = (f", reaching {beyond} nt past the block" if beyond else
+                 ", stopping at the block")
+        L.append(f"   PRIMES OVER     = {primer.prime_region}   ({len(primer.prime_region)} nt, "
+                 f"Tm {primer.prime_tm:.1f} C{reach}; dU block "
                  f"{'templated -- pairs from cycle 1' if primer.tail_templated else 'not templated'})")
         L.append(f"   3' overhang     = {primer.overhang}   (exposed after USER)")
         L.append("```")
