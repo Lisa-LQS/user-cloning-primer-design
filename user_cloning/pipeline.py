@@ -216,6 +216,19 @@ def design_assembly(
         result.messages.append(str(exc))
         return result
 
+    # Tm matching is a property of a PCR, not of a junction: fragment i is amplified by
+    # junction i's forward primer and junction i+1's reverse, so those are the two that
+    # have to hold at the same annealing temperature.
+    for fragment in result.fragments:
+        diff = abs(fragment.forward.prime_tm - fragment.reverse.prime_tm)
+        if diff > params.max_pair_tm_diff:
+            result.warnings.append(
+                f"{fragment.name}: priming Tm differs by {diff:.1f} C between "
+                f"{fragment.forward.name} ({fragment.forward.prime_tm:.1f} C) and "
+                f"{fragment.reverse.name} ({fragment.reverse.prime_tm:.1f} C), the two "
+                f"primers amplifying {fragment.source_name} together"
+            )
+
     for junction in junctions:
         result.warnings.extend(f"J{junction.index + 1}: {w}" for w in junction.warnings)
         carried = junction.block_len + len(junction.forward.extra) + len(junction.reverse.extra)

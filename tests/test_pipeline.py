@@ -18,7 +18,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 
 from user_cloning import DesignParams, SeqRecord, compare_plasmids, read_sequence_table  # noqa: E402
-from user_cloning.design import U_MARK  # noqa: E402
+from user_cloning.design import U_MARK, pair_tm_penalty  # noqa: E402
 from user_cloning.report import allocate_batch, primer_rows  # noqa: E402
 from user_cloning.pipeline import (  # noqa: E402
     ANNEAL_TEMP_C,
@@ -391,6 +391,59 @@ class TestPrimingRegion(DesignCaseMixin, unittest.TestCase):
         self.assertFalse(three.two_step)
         # The limiting primer is a property of the pair, not of the cycling choice.
         self.assertEqual(two.limiting_primer_tm_C, three.limiting_primer_tm_C)
+
+
+class TestPrimerPairingAcrossJunctions(unittest.TestCase):
+    """Tm is matched between the primers that share a tube, which span two junctions.
+
+    Fragment i is amplified by junction i's forward primer and junction i+1's reverse
+    (`build_fragments`), the last wrapping back to the first. So with two junctions the
+    tubes hold J1_F + J2_R and J2_F + J1_R -- never J1_F + J1_R. Matching Tm within a
+    junction optimises a pair that never meets and leaves the real pairs unconstrained.
+    """
+
+    def two_junction_design(self):
+        donor_payload = "".join(BACKBONE[i] for i in range(600, 1200))
+        donor = rec("pDONOR", BACKBONE[3000:4000] + donor_payload + BACKBONE[4000:5000])
+        backbone = rec("pBB", BACKBONE)
+        target_seq = BACKBONE[:5300] + donor_payload + BACKBONE[5300:]
+        result = design_assembly([backbone, donor], rec("pASM", target_seq), DATE)
+        self.assertEqual(result.status, STATUS_OK, "; ".join(result.messages))
+        self.assertEqual(len(result.fragments), 2)
+        return result
+
+    def test_a_fragment_takes_its_primers_from_two_different_junctions(self):
+        for fragment in self.two_junction_design().fragments:
+            self.assertNotEqual(
+                fragment.forward.junction, fragment.reverse.junction,
+                f"{fragment.name} would be a junction-internal pair, which cannot happen "
+                "in a multi-junction assembly",
+            )
+
+    def test_tm_is_matched_within_each_pcr_not_within_each_junction(self):
+        result = self.two_junction_design()
+        params = DesignParams()
+        for fragment in result.fragments:
+            diff = abs(fragment.forward.prime_tm - fragment.reverse.prime_tm)
+            self.assertLessEqual(
+                diff, params.max_pair_tm_diff,
+                f"{fragment.name} ({fragment.forward.name} + {fragment.reverse.name}) "
+                f"differs by {diff:.1f} C; these two share an annealing step",
+            )
+
+    def test_mismatch_warnings_name_a_fragment_not_a_junction(self):
+        result = self.two_junction_design()
+        for warning in result.warnings:
+            if "priming Tm differs" in warning:
+                self.assertRegex(warning, r"^F\d+:")
+                self.assertIn("amplifying", warning)
+
+    def test_pair_penalty_is_symmetric_and_zero_for_equal_tm(self):
+        result = self.two_junction_design()
+        a = result.fragments[0].forward
+        b = result.fragments[0].reverse
+        self.assertEqual(pair_tm_penalty(a, b), pair_tm_penalty(b, a))
+        self.assertEqual(pair_tm_penalty(a, a), 0.0)
 
 
 class TestBatching(unittest.TestCase):

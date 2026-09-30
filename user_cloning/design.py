@@ -722,11 +722,10 @@ def _score(
     warns: List[str] = []
 
     detail["tm_offset"] = abs(fwd.prime_tm - params.tm_target) + abs(rev.prime_tm - params.tm_target)
-    detail["tm_mismatch"] = 2.0 * abs(fwd.prime_tm - rev.prime_tm)
-    if abs(fwd.prime_tm - rev.prime_tm) > params.max_pair_tm_diff:
-        warns.append(
-            f"priming Tm differs by {abs(fwd.prime_tm - rev.prime_tm):.1f} C between the pair"
-        )
+    # No Tm-matching term here: a junction's own forward and reverse primers are never in
+    # the same tube. Fragment i is amplified by junction i's forward and junction i+1's
+    # reverse (see `build_fragments`), so the pairs that have to share an annealing
+    # temperature span junctions and are scored in `_select_compatible` instead.
 
     # 8-10 nt overhangs are all routine, so only penalise drifting outside that plateau.
     detail["overhang_length"] = 1.5 * max(0, abs(block_len - params.overhang_preferred) - 1)
@@ -779,13 +778,30 @@ def _range_penalty(value: float, low: float, high: float, weight: float = 1.0) -
 # --------------------------------------------------------------------------------------
 
 
+def pair_tm_penalty(fwd: Primer, rev: Primer) -> float:
+    """Cost of an annealing-temperature mismatch within one PCR.
+
+    Applied to the primers that actually share a tube, which are *not* the two primers of
+    a junction: fragment i is amplified by junction i's forward and junction i+1's reverse.
+    """
+    return 2.0 * abs(fwd.prime_tm - rev.prime_tm)
+
+
 def _select_compatible(
     candidate_sets: List[List[JunctionCandidate]],
     params: DesignParams,
 ) -> List[JunctionCandidate]:
-    """Beam search for a set of junctions with mutually orthogonal overhangs."""
+    """Beam search for a set of junctions with mutually orthogonal overhangs.
+
+    The fragments close a circle -- junction i's forward primer is amplified together with
+    junction i+1's reverse, and the last junction wraps back to the first -- so the
+    Tm-matching cost is charged here, across junctions, as each pairing is formed.
+    """
     if len(candidate_sets) == 1:
-        return [candidate_sets[0][0]]
+        # One junction: the single fragment self-circularises, so this junction's own
+        # forward and reverse do share a tube. The cyclic rule gives that for free.
+        return [min(candidate_sets[0],
+                    key=lambda c: c.penalty + pair_tm_penalty(c.forward, c.reverse))]
 
     beam: List[Tuple[float, List[JunctionCandidate]]] = [(0.0, [])]
     for candidates in candidate_sets:
@@ -794,13 +810,25 @@ def _select_compatible(
             for cand in candidates:
                 if not _orthogonal(cand, chosen, params):
                     continue
-                nxt.append((score + cand.penalty, chosen + [cand]))
+                # Appending `cand` as junction k closes the fragment running from
+                # junction k-1 into it: that fragment's primer pair is
+                # (chosen[-1].forward, cand.reverse).
+                paired = pair_tm_penalty(chosen[-1].forward, cand.reverse) if chosen else 0.0
+                nxt.append((score + cand.penalty + paired, chosen + [cand]))
         if not nxt:  # nothing orthogonal: fall back to best-scoring and warn later
             for score, chosen in beam:
-                nxt.append((score + candidates[0].penalty, chosen + [candidates[0]]))
+                fallback = candidates[0]
+                paired = (pair_tm_penalty(chosen[-1].forward, fallback.reverse)
+                          if chosen else 0.0)
+                nxt.append((score + fallback.penalty + paired, chosen + [fallback]))
         nxt.sort(key=lambda item: item[0])
         beam = nxt[: params.beam_width]
-    return beam[0][1]
+
+    # Close the circle: the last junction's forward is amplified with the first's reverse.
+    closed = [(score + pair_tm_penalty(chosen[-1].forward, chosen[0].reverse), chosen)
+              for score, chosen in beam]
+    closed.sort(key=lambda item: item[0])
+    return closed[0][1]
 
 
 def _orthogonal(
