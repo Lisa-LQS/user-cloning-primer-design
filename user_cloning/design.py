@@ -212,6 +212,34 @@ class JunctionCandidate:
     penalty: float
     penalty_detail: Dict[str, float]
     warnings: List[str] = field(default_factory=list)
+    # Everything needed to re-enumerate each primer at other annealing lengths. The
+    # overhang block and the non-templated extra are fixed by the junction, so only the
+    # 3' annealing region can move -- and moving it changes the primer's length and Tm
+    # without touching where the PCR product begins.
+    forward_scan: Optional["_ScanCtx"] = None
+    reverse_scan: Optional["_ScanCtx"] = None
+
+
+@dataclass(frozen=True)
+class _ScanCtx:
+    """Arguments `_pick_primer` was called with, kept so a primer can be re-sized later."""
+
+    target: str
+    source: str
+    direction: str
+    tail: str
+    extra: str
+    anchor: int
+    source_offset: int
+    available: int
+
+    def options(self, params: DesignParams) -> List[Primer]:
+        """Every viable primer for this end, one per annealing-region length."""
+        return _scan_anneal_lengths(
+            self.target, self.source, self.direction, self.tail, self.extra, self.anchor,
+            self.source_offset, params.anneal_min, min(params.anneal_max, self.available),
+            params, enforce_tm_ceiling=True, collect_all=True,
+        ) or []
 
 
 @dataclass
@@ -336,6 +364,9 @@ def design_junctions(
         candidate_sets.append(candidates[: params.candidates_per_junction])
 
     chosen = _select_compatible(candidate_sets, params)
+    # Junctions are fixed now, so which primers share a tube is finally known. Size each
+    # pair against each other rather than against the global Tm target.
+    warnings.extend(refine_pairs(chosen, params))
     junctions = [
         Junction(
             index=i,
@@ -513,12 +544,17 @@ def _build_candidate(
     if avail_left < params.anneal_min or avail_right < params.anneal_min:
         return None
 
+    fwd_ctx = _ScanCtx(target, spec.down_source, "forward", block, extra_f, af_start,
+                       spec.down_offset, avail_right)
+    # The reverse primer reads along the bottom strand, so both its tail and its extra
+    # segment are the reverse complements of the target-strand sequence they encode.
+    rev_ctx = _ScanCtx(target, spec.up_source, "reverse", revcomp(block), revcomp(extra_r),
+                       ar_end + spec.up_shift, spec.up_offset, avail_left)
+
     fwd = _pick_primer(
         target, spec.down_source, "forward", block, extra_f, af_start,
         spec.down_offset, avail_right, params,
     )
-    # The reverse primer reads along the bottom strand, so both its tail and its extra
-    # segment are the reverse complements of the target-strand sequence they encode.
     rev = _pick_primer(
         target, spec.up_source, "reverse", revcomp(block), revcomp(extra_r),
         ar_end + spec.up_shift, spec.up_offset, avail_left, params,
@@ -558,6 +594,8 @@ def _build_candidate(
         penalty=penalty,
         penalty_detail=detail,
         warnings=warns,
+        forward_scan=fwd_ctx,
+        reverse_scan=rev_ctx,
     )
 
 
@@ -619,7 +657,15 @@ def _scan_anneal_lengths(
     length_max: int,
     params: DesignParams,
     enforce_tm_ceiling: bool,
-) -> Optional[Primer]:
+    collect_all: bool = False,
+):
+    """Best primer for this annealing window, or every viable one when `collect_all`.
+
+    `collect_all` is what the partner-aware re-sizing pass needs: the single best length
+    here is the one closest to the global Tm target, which is not necessarily the one that
+    matches the primer this oligo will actually share a tube with.
+    """
+    found: List[Primer] = []
     best: Optional[Primer] = None
     best_key: Optional[Tuple[float, ...]] = None
 
@@ -693,8 +739,9 @@ def _scan_anneal_lengths(
         )
         if best_key is None or key < best_key:
             best, best_key = primer, key
+        found.append(primer)
 
-    return best
+    return best if not collect_all else found
 
 
 def _templated_head_length(
@@ -775,11 +822,7 @@ def _score(
     # Long oligos cost more and are synthesised less accurately, and crossing the standard
     # 60 nt limit forces an Ultramer order, so the penalty steepens there. Charging both
     # primers separately also pushes new sequence to be split evenly between the pair.
-    detail["length"] = sum(
-        params.length_weight * max(0, primer.length - params.length_free_upto) ** 2 / 10.0
-        + 0.6 * max(0, primer.length - params.soft_max_primer_len)
-        for primer in (fwd, rev)
-    )
+    detail["length"] = sum(_length_penalty(primer, params) for primer in (fwd, rev))
     # Total primer length is fixed once the junction has to carry a given amount of new
     # sequence, so the penalty above is blind to how that sequence is divided. Charging the
     # imbalance separately makes the pair converge on two medium oligos rather than one very
@@ -806,6 +849,93 @@ def _range_penalty(value: float, low: float, high: float, weight: float = 1.0) -
 # --------------------------------------------------------------------------------------
 # Multi-junction selection
 # --------------------------------------------------------------------------------------
+
+
+def refine_pairs(
+    chosen: Sequence[JunctionCandidate],
+    params: DesignParams,
+) -> List[str]:
+    """Re-size each primer against the one it shares a tube with.
+
+    Primers are first sized one at a time, each toward `params.tm_target`, because at that
+    point nothing knows which other primer it will be amplified with. Only after the
+    junctions are fixed is that known: fragment i is primed by junction i's forward and
+    junction i+1's reverse. Those two have to hold at one annealing temperature, and where
+    one of them is pinned -- a GC-rich stretch where even the shortest allowed region runs
+    hot -- the fix is to lengthen its partner to meet it rather than leave the pair split.
+
+    The fragments partition the primers into disjoint pairs, so each pair is optimised
+    independently. Only the 3' annealing region moves; the overhang block and the carried
+    extra are fixed by the junction, and the primer's 5' end is where the product begins,
+    so re-sizing cannot change the assembled plasmid.
+
+    Returns a note for each pair it actually improved.
+    """
+    notes: List[str] = []
+    n = len(chosen)
+    for i, left in enumerate(chosen):
+        right = chosen[(i + 1) % n]
+        fwd_opts = left.forward_scan.options(params) if left.forward_scan else []
+        rev_opts = right.reverse_scan.options(params) if right.reverse_scan else []
+        if not fwd_opts or not rev_opts:
+            continue
+
+        # Matching the pair is only worth having inside the usable window. Without this
+        # the length term will happily buy a shorter, better-matched pair that anneals
+        # below the bench temperature -- two primers agreeing at 60 C is not a good pair
+        # when the thermocycler sits at 64. Keep the in-window options if there are any,
+        # and fall back to the full set only when the window cannot be met at all.
+        def in_window(opts: List[Primer]) -> List[Primer]:
+            kept = [p for p in opts if params.tm_min <= p.prime_tm <= params.tm_max]
+            return kept or opts
+
+        fwd_opts, rev_opts = in_window(fwd_opts), in_window(rev_opts)
+
+        def cost(f: Primer, r: Primer) -> float:
+            return (abs(f.prime_tm - params.tm_target)
+                    + abs(r.prime_tm - params.tm_target)
+                    + pair_tm_penalty(f, r)
+                    + _three_prime_penalty(f.anneal) + _three_prime_penalty(r.anneal)
+                    + _length_penalty(f, params) + _length_penalty(r, params))
+
+        before = cost(left.forward, right.reverse)
+        best_f, best_r = left.forward, right.reverse
+        best = before
+        for f in fwd_opts:
+            for r in rev_opts:
+                c = cost(f, r)
+                if c < best - 1e-9:
+                    best, best_f, best_r = c, f, r
+        if best_f is left.forward and best_r is right.reverse:
+            continue
+
+        was = abs(left.forward.prime_tm - right.reverse.prime_tm)
+        now = abs(best_f.prime_tm - best_r.prime_tm)
+        _adopt(left.forward, best_f)
+        _adopt(right.reverse, best_r)
+        notes.append(
+            f"F{i + 1}: re-sized its primer pair for each other rather than for the "
+            f"{params.tm_target:.0f} C target -- Tm gap {was:.1f} -> {now:.1f} C"
+        )
+    return notes
+
+
+def _length_penalty(primer: Primer, params: DesignParams) -> float:
+    return (params.length_weight * max(0, primer.length - params.length_free_upto) ** 2 / 10.0
+            + 0.6 * max(0, primer.length - params.soft_max_primer_len))
+
+
+def _adopt(target: Primer, source: Primer) -> None:
+    """Copy a re-sized primer's sequence fields in place.
+
+    In place because the same Primer object is referenced by both the junction and the
+    fragment; rebinding one would leave the other pointing at the old oligo. `name` and
+    `junction` are set elsewhere and must survive.
+    """
+    for attr in ("sequence", "u_index", "tail", "extra", "anneal", "anneal_tm",
+                 "prime_region", "prime_tm", "tail_templated", "full_tm", "gc_percent",
+                 "template_hits", "warnings"):
+        setattr(target, attr, getattr(source, attr))
 
 
 def pair_tm_penalty(fwd: Primer, rev: Primer) -> float:

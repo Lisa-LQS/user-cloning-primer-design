@@ -545,6 +545,71 @@ class TestLengthPenalty(unittest.TestCase):
         self.assertAlmostEqual(self.cost(70, params), 0.6 * 10)
 
 
+class TestPartnerAwareResizing(unittest.TestCase):
+    """After junctions are fixed, each primer is re-sized against its tube-mate.
+
+    Sizing happens before anything knows which primers share a PCR, so each is first sized
+    toward the global Tm target. `refine_pairs` revisits that once the fragments are known.
+    """
+
+    def design(self, params: DesignParams = None):
+        donor_payload = "".join(BACKBONE[i] for i in range(600, 1200))
+        donor = rec("pDONOR", BACKBONE[3000:4000] + donor_payload + BACKBONE[4000:5000])
+        target_seq = BACKBONE[:5300] + donor_payload + BACKBONE[5300:]
+        result = design_assembly([rec("pBB", BACKBONE), donor], rec("pASM", target_seq),
+                                 DATE, params or DesignParams())
+        self.assertEqual(result.status, STATUS_OK, "; ".join(result.messages))
+        return result
+
+    def test_resizing_cannot_change_the_assembled_plasmid(self):
+        """Only the 3' annealing region may move. The overhang block and the carried extra
+        define the junction, and the primer's 5' end is where the product begins."""
+        result = self.design()
+        self.assertTrue(result.verified, "; ".join(result.verification.errors))
+        for junction in result.junctions:
+            for primer in (junction.forward, junction.reverse):
+                self.assertTrue(primer.sequence.startswith(primer.tail + primer.extra),
+                                f"{primer.name} 5' end no longer matches its junction")
+        # And the independent check: the predicted plasmid is still the requested one.
+        donor_payload = "".join(BACKBONE[i] for i in range(600, 1200))
+        target_seq = BACKBONE[:5300] + donor_payload + BACKBONE[5300:]
+        equal, _ = circular_equal(predicted_plasmid(result), target_seq)
+        self.assertTrue(equal)
+
+    def test_pairs_end_up_matched(self):
+        params = DesignParams()
+        for fragment in self.design().fragments:
+            self.assertLessEqual(
+                abs(fragment.forward.prime_tm - fragment.reverse.prime_tm),
+                params.max_pair_tm_diff,
+                f"{fragment.name} pair is still split after re-sizing",
+            )
+
+    def test_matching_never_drags_a_primer_out_of_the_usable_window(self):
+        """The regression this guards: scored on Tm gap and length alone, the pass once
+        picked a pair agreeing at 59.5/60.3 C -- well matched, but below the 61 C floor
+        and below the bench annealing step, so neither primer would hold."""
+        params = DesignParams()
+        for fragment in self.design().fragments:
+            for primer in (fragment.forward, fragment.reverse):
+                self.assertGreaterEqual(
+                    primer.prime_tm, params.tm_min - 0.1,
+                    f"{primer.name} at {primer.prime_tm:.1f} C is below the "
+                    f"{params.tm_min} C floor",
+                )
+                self.assertGreaterEqual(
+                    primer.prime_tm, ANNEAL_TEMP_C - params.max_pair_tm_diff,
+                    f"{primer.name} at {primer.prime_tm:.1f} C cannot hold at the "
+                    f"{ANNEAL_TEMP_C} C annealing step",
+                )
+
+    def test_pass_is_reported_when_it_acts(self):
+        notes = [w for w in self.design().warnings if "re-sized" in w]
+        for note in notes:
+            self.assertRegex(note, r"^F\d+:")
+            self.assertIn("Tm gap", note)
+
+
 class TestBatching(unittest.TestCase):
     """Several batches can land on the same day, and results are never destroyed."""
 
