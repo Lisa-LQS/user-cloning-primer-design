@@ -98,6 +98,19 @@ class DesignParams:
     soft_max_primer_len: int = 60   # standard desalted oligo limit at most vendors
     hard_max_primer_len: int = 120  # beyond this an Ultramer/gene fragment is saner
 
+    unaligned_weight: float = 0.5
+    """Cost per nt of primer that does not pair with the template in cycle 1.
+
+    `length_weight` charges the whole oligo, which cannot tell a long primer that anneals
+    over all of itself from one of the same length with a third of it hanging off as an
+    unpaired 5' flap. Those are different molecules: the flap buys no binding, has to be
+    synthesised correctly anyway, and is dead weight in the first cycle. Two candidates
+    can have identical priming regions and identical Tm and differ three-fold here.
+
+    Some of the flap is unavoidable -- an insertion has to be carried on the primers
+    somehow -- but that part is constant across candidates for a given junction, so
+    charging it uniformly does not distort the ranking."""
+
     length_free_upto: int = 40
     length_weight: float = 1.0
     """Cost of primer length, charged per primer as
@@ -823,6 +836,7 @@ def _score(
     # 60 nt limit forces an Ultramer order, so the penalty steepens there. Charging both
     # primers separately also pushes new sequence to be split evenly between the pair.
     detail["length"] = sum(_length_penalty(primer, params) for primer in (fwd, rev))
+    detail["unaligned"] = sum(_unaligned_penalty(primer, params) for primer in (fwd, rev))
     # Total primer length is fixed once the junction has to carry a given amount of new
     # sequence, so the penalty above is blind to how that sequence is divided. Charging the
     # imbalance separately makes the pair converge on two medium oligos rather than one very
@@ -896,7 +910,8 @@ def refine_pairs(
                     + abs(r.prime_tm - params.tm_target)
                     + pair_tm_penalty(f, r)
                     + _three_prime_penalty(f.anneal) + _three_prime_penalty(r.anneal)
-                    + _length_penalty(f, params) + _length_penalty(r, params))
+                    + _length_penalty(f, params) + _length_penalty(r, params)
+                    + _unaligned_penalty(f, params) + _unaligned_penalty(r, params))
 
         before = cost(left.forward, right.reverse)
         best_f, best_r = left.forward, right.reverse
@@ -923,6 +938,11 @@ def refine_pairs(
 def _length_penalty(primer: Primer, params: DesignParams) -> float:
     return (params.length_weight * max(0, primer.length - params.length_free_upto) ** 2 / 10.0
             + 0.6 * max(0, primer.length - params.soft_max_primer_len))
+
+
+def _unaligned_penalty(primer: Primer, params: DesignParams) -> float:
+    """Charge the 5' bases that do not pair with the template in the first cycle."""
+    return params.unaligned_weight * (primer.length - len(primer.prime_region))
 
 
 def _adopt(target: Primer, source: Primer) -> None:
