@@ -152,7 +152,7 @@ and to check them.
    split between the pair.
 5. **Size each annealing region** to hit the Tm target. Only regions with exactly one
    binding site in the circular template (both strands) are accepted; if nothing in the
-   normal 18–32 nt range is unique — which happens inside duplicated promoters or LTRs —
+   normal 15–32 nt range is unique — which happens inside duplicated promoters or LTRs —
    the region is extended up to 60 nt to reach out of the repeat, and if that fails the
    site is refused with an explanation rather than given unusable primers.
 6. **Pair primers into fragments.** One edit site gives a single whole-plasmid product that
@@ -184,7 +184,7 @@ would amplify two products.
 
 ## Tuning
 
-`--overhang-min/--overhang-max` (default 8–12), `--anneal-min/--anneal-max` (18–32),
+`--overhang-min/--overhang-max` (default 8–12), `--anneal-min/--anneal-max` (15–32),
 `--tm-target` (64 °C, applied to the priming region), `--junction-slack` (how far from an edit the overhang block may sit,
 30 nt), `--max-primer-len` (60 nt, the length above which an Ultramer is flagged).
 Programmatic users can pass any `DesignParams` field.

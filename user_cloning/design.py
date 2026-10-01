@@ -61,7 +61,16 @@ class DesignParams:
     overhang_gc_min: float = 20.0
     overhang_gc_max: float = 80.0
 
-    anneal_min: int = 18
+    anneal_min: int = 15
+    """Floor on the template-copied block at the primer's 3' end.
+
+    Note this is the *layout* block, not the footprint that binds. Where the 5' tail is
+    templated too, the priming region runs well past the block -- at 15 here it is still
+    22-28 nt on the pLL047P designs -- and that longer region is what has to be unique.
+    The uniqueness test is nonetheless still applied to the block, so this floor cannot be
+    dropped much further without weakening it; moving the test onto the priming region is
+    the way to go lower.
+    """
     anneal_max: int = 32
     anneal_hard_max: int = 60
     """Only used as a fallback: plasmids often carry repeated elements (duplicated
