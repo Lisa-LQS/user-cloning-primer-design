@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
@@ -502,6 +503,46 @@ class TestReportedRegionsMatchReality(unittest.TestCase):
             # The old column name asserted these bases were non-templated. Whatever the
             # column is called now, it must not make that claim when they do pair.
             self.assertNotIn("non_templated", " ".join(row.keys()))
+
+
+class TestLengthPenalty(unittest.TestCase):
+    """Primer length is charged superlinearly, so very long oligos are not nearly free."""
+
+    @staticmethod
+    def cost(length: int, params: DesignParams = None) -> float:
+        p = params or DesignParams()
+        return (p.length_weight * max(0, length - p.length_free_upto) ** 2 / 10.0
+                + 0.6 * max(0, length - p.soft_max_primer_len))
+
+    def test_short_primers_are_free(self):
+        for length in (20, 30, 40):
+            self.assertEqual(self.cost(length), 0.0)
+
+    def test_cost_accelerates_with_length(self):
+        """Each extra 5 nt must cost more than the previous 5 did -- that is the point of
+        a squared term over a linear one."""
+        steps = [self.cost(n + 5) - self.cost(n) for n in range(40, 60, 5)]
+        for earlier, later in zip(steps, steps[1:]):
+            self.assertGreater(later, earlier)
+
+    def test_a_long_oligo_outweighs_a_small_tm_mismatch(self):
+        """The regression this guards: at the old linear 0.15/nt a 60 nt primer cost 2.25,
+        less than a 2 C mismatch within a PCR pair, so length never influenced a choice."""
+        two_degrees = 2.0 * 2.0  # pair_tm_penalty for a 2 C difference
+        self.assertGreater(self.cost(60), two_degrees)
+        self.assertGreater(self.cost(54), two_degrees)
+
+    def test_crossing_the_ultramer_limit_adds_a_step(self):
+        below, above = self.cost(60), self.cost(61)
+        smooth = (DesignParams().length_weight
+                  * (61 - DesignParams().length_free_upto) ** 2 / 10.0)
+        self.assertGreater(above - below, 0.0)
+        self.assertAlmostEqual(above - smooth, 0.6, places=6)
+
+    def test_weight_zero_disables_the_term(self):
+        params = replace(DesignParams(), length_weight=0.0)
+        self.assertEqual(self.cost(55, params), 0.0)
+        self.assertAlmostEqual(self.cost(70, params), 0.6 * 10)
 
 
 class TestBatching(unittest.TestCase):

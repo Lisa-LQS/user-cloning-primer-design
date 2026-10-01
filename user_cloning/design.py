@@ -98,6 +98,17 @@ class DesignParams:
     soft_max_primer_len: int = 60   # standard desalted oligo limit at most vendors
     hard_max_primer_len: int = 120  # beyond this an Ultramer/gene fragment is saner
 
+    length_free_upto: int = 40
+    length_weight: float = 1.0
+    """Cost of primer length, charged per primer as
+    `length_weight * (len - length_free_upto)**2 / 10`.
+
+    Superlinear on purpose: a few bases past `length_free_upto` are routine and should
+    barely register, while a 55-60 nt oligo is expensive, synthesised less accurately, and
+    usually a sign the junction was placed where it has to bridge a long stretch. A linear
+    charge cannot express that gap -- at any slope gentle enough to leave 46 nt alone, a
+    60 nt oligo still cost less than a 2 C mismatch within a PCR pair."""
+
     junction_window_slack: int = 30  # how far from the edit the overhang block may sit
     candidates_per_junction: int = 40
     beam_width: int = 60
@@ -765,7 +776,7 @@ def _score(
     # 60 nt limit forces an Ultramer order, so the penalty steepens there. Charging both
     # primers separately also pushes new sequence to be split evenly between the pair.
     detail["length"] = sum(
-        0.15 * max(0, primer.length - 45)
+        params.length_weight * max(0, primer.length - params.length_free_upto) ** 2 / 10.0
         + 0.6 * max(0, primer.length - params.soft_max_primer_len)
         for primer in (fwd, rev)
     )

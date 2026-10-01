@@ -186,7 +186,7 @@ would amplify two products.
 
 `--overhang-min/--overhang-max` (default 8–12), `--anneal-min/--anneal-max` (15–32),
 `--tm-target` (64 °C, applied to the priming region), `--junction-slack` (how far from an edit the overhang block may sit,
-30 nt), `--max-primer-len` (60 nt, the length above which an Ultramer is flagged).
+30 nt), `--max-primer-len` (60 nt, the length above which an Ultramer is flagged), `--length-weight` (1.0; primer length is charged per primer as `weight*(len-40)^2/10`, so a 54 nt oligo costs ~20 and a 46 nt one ~3.6 — set 0 to ignore length).
 Programmatic users can pass any `DesignParams` field.
 
 ## Layout

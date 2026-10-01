@@ -82,6 +82,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                       help="how far from an edit the overhang block may be placed (nt)")
     tune.add_argument("--max-primer-len", type=int, default=DesignParams.soft_max_primer_len,
                       help="length above which a primer is flagged as an Ultramer order")
+    tune.add_argument("--length-weight", type=float, default=DesignParams.length_weight,
+                      help="how hard to penalise long primers; charged per primer as "
+                           "weight*(len-40)^2/10. 0 disables it")
     return p
 
 
@@ -100,6 +103,7 @@ def params_from_args(args: argparse.Namespace) -> DesignParams:
         tm_target=args.tm_target,
         junction_window_slack=args.junction_slack,
         soft_max_primer_len=args.max_primer_len,
+        length_weight=args.length_weight,
     )
 
 
