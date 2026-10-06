@@ -102,10 +102,9 @@ def plan_assembly(
         return plan
 
     others = [s for s in sources if s.name != backbone.name]
-    resolved = [
-        _resolve_edit(edit, others, comparison, min_amplified_insert)
-        for edit in comparison.edits
-    ]
+    resolved = []
+    for edit in comparison.edits:
+        resolved.extend(_resolve_edit(edit, others, comparison, min_amplified_insert))
     for res in resolved:
         if res.source is not None and res.source.name not in plan.sources_used:
             plan.sources_used.append(res.source.name)
@@ -136,11 +135,16 @@ def _resolve_edit(
     others: Sequence[SeqRecord],
     comparison: PlasmidComparison,
     min_amplified_insert: int,
-) -> _ResolvedEdit:
-    """Look for this edit's new sequence as a contiguous block in one of the other sources."""
+) -> List[_ResolvedEdit]:
+    """Work out where this edit's new sequence comes from.
+
+    Usually the whole block sits in one other source. When it does not, the block may still
+    be a join of two or more donor stretches (a cassette assembled from several plasmids),
+    so fall back to tiling it; whatever no donor covers stays on the primer tails.
+    """
     new = edit.tgt_seq
     if not new or not others:
-        return _ResolvedEdit(edit=edit)
+        return [_ResolvedEdit(edit=edit)]
 
     for source in others:
         hit = _locate_block(source.seq, new)
@@ -148,33 +152,142 @@ def _resolve_edit(
             continue
         start, flipped = hit
         if len(new) < min_amplified_insert:
-            return _ResolvedEdit(
+            return [_ResolvedEdit(
                 edit=edit,
                 notes=[
                     f"The {len(new)} nt of new sequence is present in {source.name} but is short "
                     "enough to carry on the primer tails, so it is not amplified separately."
                 ],
-            )
+            )]
         strand = " (reverse complement)" if flipped else ""
-        return _ResolvedEdit(
+        return [_ResolvedEdit(
             edit=edit, source=source, source_start=start, reverse_complemented=flipped,
             notes=[
                 f"The {len(new)} nt insert matches {source.name} {start + 1}.."
                 f"{start + len(new)}{strand} exactly, so it is amplified from {source.name} as "
                 "its own fragment."
             ],
-        )
+        )]
 
-    if len(new) >= min_amplified_insert and others:
-        return _ResolvedEdit(
+    if len(new) >= min_amplified_insert:
+        tiled = _tile_edit(edit, others, min_amplified_insert)
+        if tiled is not None:
+            return tiled
+        return [_ResolvedEdit(
             edit=edit,
             notes=[
                 f"The {len(new)} nt of new sequence was not found as a contiguous block in "
                 + ", ".join(s.name for s in others)
-                + "; it will be carried on the primers instead."
+                + ", and could not be tiled across them either; it will be carried on the "
+                "primers instead."
             ],
+        )]
+    return [_ResolvedEdit(edit=edit)]
+
+
+def _longest_donor_block(
+    motif: str,
+    others: Sequence[SeqRecord],
+) -> Optional[Tuple[int, SeqRecord, int, bool]]:
+    """Longest prefix of `motif` that sits uniquely in one donor. (length, donor, start, rc)"""
+    best: Optional[Tuple[int, SeqRecord, int, bool]] = None
+    for source in others:
+        # Presence shrinks with length and uniqueness grows with it, so the longest prefix
+        # that occurs at all is also the one most likely to occur exactly once.
+        lo, hi = 0, min(len(motif), len(source.seq))
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if _locate_block(source.seq, motif[:mid]) is not None:
+                lo = mid
+            else:
+                hi = mid - 1
+        if lo == 0:
+            continue
+        hit = _locate_block(source.seq, motif[:lo])
+        if hit is None:
+            continue
+        if best is None or lo > best[0]:
+            best = (lo, source, hit[0], hit[1])
+    return best
+
+
+def _tile_edit(
+    edit: EditSite,
+    others: Sequence[SeqRecord],
+    min_amplified_insert: int,
+) -> Optional[List[_ResolvedEdit]]:
+    """Split one insertion across several donors, longest donor stretch first.
+
+    Returns None when tiling buys nothing -- fewer than two donor stretches, which the
+    single-block search above has already ruled out.
+    """
+    new = edit.tgt_seq
+    pieces: List[Tuple[int, int, Optional[SeqRecord], int, bool]] = []  # start,end,src,pos,rc
+    pos = 0
+    while pos < len(new):
+        found = _longest_donor_block(new[pos:], others)
+        if found is None:
+            # No donor covers the next base; walk forward to where one picks up again.
+            nxt = pos + 1
+            while nxt < len(new) and _longest_donor_block(new[nxt:], others) is None:
+                nxt += 1
+            pieces.append((pos, nxt, None, 0, False))
+            pos = nxt
+            continue
+        length, source, start, flipped = found
+        pieces.append((pos, pos + length, source, start, flipped))
+        pos += length
+
+    # A donor stretch too short to be worth its own PCR goes onto the tails instead.
+    pieces = [
+        p if p[2] is None or (p[1] - p[0]) >= min_amplified_insert
+        else (p[0], p[1], None, 0, False)
+        for p in pieces
+    ]
+    merged: List[Tuple[int, int, Optional[SeqRecord], int, bool]] = []
+    for piece in pieces:
+        if merged and piece[2] is None and merged[-1][2] is None:
+            prev = merged[-1]
+            merged[-1] = (prev[0], piece[1], None, 0, False)
+        else:
+            merged.append(piece)
+
+    if sum(1 for p in merged if p[2] is not None) < 2:
+        return None
+
+    resolved: List[_ResolvedEdit] = []
+    for start, end, source, src_pos, flipped in merged:
+        sub = EditSite(
+            # An insertion does not consume template, so every piece shares the one point.
+            tpl_start=edit.tpl_start,
+            tpl_end=edit.tpl_end,
+            tgt_start=edit.tgt_start + start,
+            tgt_end=edit.tgt_start + end,
+            tpl_seq="",
+            tgt_seq=new[start:end],
         )
-    return _ResolvedEdit(edit=edit)
+        if source is None:
+            resolved.append(_ResolvedEdit(edit=sub, notes=[
+                f"{end - start} nt of the insert ({start + 1}..{end} of {len(new)}) is in no "
+                "donor and is carried on the primer tails."
+            ]))
+        else:
+            strand = " (reverse complement)" if flipped else ""
+            resolved.append(_ResolvedEdit(
+                edit=sub, source=source, source_start=src_pos, reverse_complemented=flipped,
+                notes=[
+                    f"Insert {start + 1}..{end} of {len(new)} nt matches {source.name} "
+                    f"{src_pos + 1}..{src_pos + (end - start)}{strand}, so it is amplified "
+                    f"from {source.name} as its own fragment."
+                ],
+            ))
+    names = ", ".join(p[2].name for p in merged if p[2] is not None)
+    resolved[0].notes.insert(
+        0,
+        f"The {len(new)} nt insert is not a single block of any one donor; it is tiled "
+        f"across {names}.",
+    )
+    return resolved
 
 
 def _locate_block(source: str, motif: str) -> Optional[Tuple[int, bool]]:
@@ -215,6 +328,28 @@ def _build_segments(
     segments: List[Segment] = []
     # Walk the circle: a backbone stretch, then an insert, then backbone, and so on.
     order = sorted(amplified, key=lambda r: r.edit.tgt_start)
+    # New sequence no donor carries rides on the tails, so the backbone picks up only after
+    # it. Measure how much of that trails each amplified piece.
+    by_start = sorted(resolved, key=lambda r: r.edit.tgt_start)
+    tail_after: Dict[int, int] = {}
+    head_before: Dict[int, int] = {}
+    for i, res in enumerate(by_start):
+        if not res.amplified:
+            continue
+        tail = 0
+        j = i + 1
+        while j < len(by_start) and not by_start[j].amplified \
+                and by_start[j].edit.tgt_start == res.edit.tgt_end + tail:
+            tail += by_start[j].edit.new_length
+            j += 1
+        tail_after[res.edit.tgt_start] = tail
+        head = 0
+        j = i - 1
+        while j >= 0 and not by_start[j].amplified \
+                and by_start[j].edit.tgt_end == res.edit.tgt_start - head:
+            head += by_start[j].edit.new_length
+            j -= 1
+        head_before[res.edit.tgt_start] = head
     for i, res in enumerate(order):
         edit = res.edit
         nxt = order[(i + 1) % len(order)]
@@ -236,10 +371,15 @@ def _build_segments(
                 reverse_complemented=res.reverse_complemented,
             )
         )
-        # Backbone stretch from the end of this insert to the start of the next one.
-        back_start = edit.tgt_end
-        back_end = nxt.edit.tgt_start
-        if back_end <= back_start:
+        # Backbone stretch from the end of this insert to the start of the next one,
+        # picking up after any non-templated sequence that trails this insert.
+        back_start = edit.tgt_end + tail_after.get(edit.tgt_start, 0)
+        # ...and hands over before any non-templated sequence leading the next insert.
+        back_end = nxt.edit.tgt_start - head_before.get(nxt.edit.tgt_start, 0)
+        if back_end == back_start:
+            # Two donor pieces butt together: no backbone between them.
+            continue
+        if back_end < back_start:
             back_end += n
         segments.append(
             Segment(
@@ -248,7 +388,8 @@ def _build_segments(
                 source_seq=comparison.template,
                 tgt_start=back_start,
                 tgt_end=back_end,
-                source_offset=(edit.tpl_end - edit.tgt_end) % len(comparison.template),
+                # The template resumes at tpl_end, which now sits at back_start.
+                source_offset=(edit.tpl_end - back_start) % len(comparison.template),
             )
         )
     return segments
@@ -263,6 +404,9 @@ def _build_specs(
     """One junction per segment boundary, carrying any primer-borne sequence with it."""
     target = comparison.target
     primer_borne = {r.edit.tgt_start: r.edit for r in resolved if not r.amplified}
+    # A primer-borne piece that trails an amplified one ends where the next segment starts,
+    # so it is reached by its end coordinate rather than its start.
+    primer_borne_by_end = {r.edit.tgt_end: r.edit for r in resolved if not r.amplified}
 
     if len(segments) == 1:
         # Whole-plasmid amplification; each edit becomes its own junction on the backbone.
@@ -296,7 +440,8 @@ def _build_specs(
     for i, segment in enumerate(segments):
         upstream = segments[(i - 1) % count]
         boundary = segment.tgt_start
-        edit = primer_borne.get(boundary % len(target))
+        edit = primer_borne_by_end.get(boundary % len(target)) \
+            or primer_borne.get(boundary % len(target))
         new_length = edit.new_length if edit is not None else 0
         # The upstream segment's own frame ends at `upstream.tgt_end`, which is the same
         # target position as `boundary` but possibly a whole turn of the circle away.
@@ -349,8 +494,11 @@ def verify_plan(plan: AssemblyPlan) -> None:
                 f"{segment.tgt_start % len(target) + 1}"
             )
         rebuilt.append(expected)
+    # Sequence no source carries is not in any segment; the primer tails spell it out.
+    on_tails = sum(spec.new_length for spec in plan.specs)
     total = sum(s.length for s in plan.segments)
-    if total != len(target):
+    if total + on_tails != len(target):
         raise DesignError(
-            f"Segments cover {total} nt but the target is {len(target)} nt"
+            f"Segments cover {total} nt and primer tails add {on_tails} nt, but the target "
+            f"is {len(target)} nt"
         )

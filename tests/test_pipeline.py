@@ -9,6 +9,7 @@ tests exercise realistic sequence composition, repeats included.
 from __future__ import annotations
 
 import os
+import random
 import subprocess
 import sys
 import tempfile
@@ -931,3 +932,66 @@ class TestCli(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestInsertTiledAcrossDonors(unittest.TestCase):
+    """An insert that is not one block of any single donor, but a join of two.
+
+    pLL057Z is built this way: 607 nt of the cassette comes from pLL217, the next 372 nt
+    from pNB0153c_3, and the last 6 nt from neither. Payloads here are synthetic rather
+    than backbone slices, so that each one primes uniquely.
+    """
+
+    @staticmethod
+    def payload(seed: int, length: int) -> str:
+        rng = random.Random(seed)
+        # Balanced GC and no long homopolymers, so junction placement is never the
+        # thing under test here.
+        return "".join(rng.choice("ACGT") for _ in range(length))
+
+    def assemble(self, sources, target_seq, name="pTILED"):
+        target = rec(name, target_seq)
+        result = design_assembly(sources, target, DATE)
+        self.assertEqual(result.status, STATUS_OK, "; ".join(result.messages))
+        self.assertTrue(result.verified, "; ".join(result.verification.errors))
+        equal, _ = circular_equal(predicted_plasmid(result), target_seq)
+        self.assertTrue(equal, "predicted plasmid does not match the requested target")
+        return result
+
+    def test_two_donors_make_one_insert(self):
+        left = self.payload(1, 700)
+        right = self.payload(2, 600)
+        donor_a = rec("pDA", self.payload(3, 800) + left)
+        donor_b = rec("pDB", self.payload(4, 600) + right)
+        backbone = rec("pBB", BACKBONE)
+        target_seq = BACKBONE[:5300] + left + right + BACKBONE[5300:]
+        result = self.assemble([backbone, donor_a, donor_b], target_seq)
+        self.assertEqual(
+            {f.source_name for f in result.fragments}, {"pBB", "pDA", "pDB"},
+            "each donor should contribute its own PCR fragment")
+        self.assertEqual(len(result.fragments), 3)
+
+    def test_tiled_insert_with_untemplated_tail(self):
+        """The real pLL057Z shape: two donor blocks plus a short non-templated tail."""
+        left = self.payload(5, 700)
+        right = self.payload(6, 600)
+        tail = "GATCTAGA"
+        donor_a = rec("pDA", self.payload(7, 800) + left)
+        donor_b = rec("pDB", self.payload(8, 600) + right)
+        backbone = rec("pBB", BACKBONE)
+        target_seq = BACKBONE[:5300] + left + right + tail + BACKBONE[5300:]
+        result = self.assemble([backbone, donor_a, donor_b], target_seq)
+        self.assertEqual(len(result.fragments), 3)
+        # The tail is on nobody's template, so it has to be written into a primer.
+        self.assertTrue(
+            any(tail in p.sequence.replace(U_MARK, "") for p in result.primers),
+            "the non-templated tail must be carried on a primer")
+
+    def test_single_block_insert_is_unchanged(self):
+        """Tiling must not disturb the ordinary one-donor case."""
+        load = self.payload(9, 700)
+        donor = rec("pD", self.payload(10, 800) + load)
+        backbone = rec("pBB", BACKBONE)
+        target_seq = BACKBONE[:5300] + load + BACKBONE[5300:]
+        result = self.assemble([backbone, donor], target_seq)
+        self.assertEqual(len(result.fragments), 2)
