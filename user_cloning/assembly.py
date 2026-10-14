@@ -102,6 +102,14 @@ def plan_assembly(
         return plan
 
     others = [s for s in sources if s.name != backbone.name]
+    edits = _consolidate_edits(comparison, others)
+    if len(edits) < len(comparison.edits):
+        plan.notes.append(
+            f"{len(comparison.edits)} raw differences merged into {len(edits)}: the new "
+            "sequence agrees with what it replaces in places, which splits one swap into "
+            "several differences."
+        )
+        comparison.edits = edits
     resolved = []
     for edit in comparison.edits:
         resolved.extend(_resolve_edit(edit, others, comparison, min_amplified_insert))
@@ -113,6 +121,50 @@ def plan_assembly(
     plan.segments = _build_segments(comparison, backbone, resolved)
     plan.specs = _build_specs(comparison, plan.segments, resolved, params)
     return plan
+
+
+def _consolidate_edits(
+    comparison: PlasmidComparison,
+    others: Sequence[SeqRecord],
+) -> List[EditSite]:
+    """Merge runs of edits that one donor spans as a single contiguous block.
+
+    A cassette swap is one edit, but the diff breaks it wherever the incoming sequence
+    happens to agree with the sequence it replaces -- and a donor cassette built from the
+    same parts as the region it supersedes agrees with it often. Those incidental matches
+    are too long for `merge_gap` to close, so the swap arrives here as several edits, each
+    too small to amplify. Whenever a whole run reads as one unbroken stretch of a donor, it
+    is one swap: merge it, so it becomes one amplified fragment rather than several.
+    """
+    edits = sorted(comparison.edits, key=lambda e: e.tgt_start)
+    if len(edits) < 2 or not others:
+        return edits
+
+    merged: List[EditSite] = []
+    i = 0
+    while i < len(edits):
+        # Longest run first: a shorter one may also sit in a donor, but the longest is the
+        # one that takes the whole swap in a single fragment.
+        best_j = i
+        for j in range(len(edits) - 1, i, -1):
+            span = comparison.target[edits[i].tgt_start:edits[j].tgt_end]
+            if any(_locate_block(s.seq, span) is not None for s in others):
+                best_j = j
+                break
+        if best_j == i:
+            merged.append(edits[i])
+        else:
+            first, last = edits[i], edits[best_j]
+            merged.append(EditSite(
+                tpl_start=first.tpl_start,
+                tpl_end=last.tpl_end,
+                tgt_start=first.tgt_start,
+                tgt_end=last.tgt_end,
+                tpl_seq=comparison.template[first.tpl_start:last.tpl_end],
+                tgt_seq=comparison.target[first.tgt_start:last.tgt_end],
+            ))
+        i = best_j + 1
+    return merged
 
 
 @dataclass
